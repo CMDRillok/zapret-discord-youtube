@@ -10,22 +10,10 @@ if (-not (Test-Path $resultsDir)) { New-Item -ItemType Directory -Path $resultsD
 function Get-IpsetStatus {
     $listFile = Join-Path $listsDir "ipset-all.txt"
     if (-not (Test-Path $listFile)) { return "none" }
-    $raw = [IO.File]::ReadAllText($listFile)
-    if ([string]::IsNullOrWhiteSpace($raw)) { return "any" }
-    if ($raw -match '203\.0\.113\.113/32') { return "none" }
-    return "loaded"
-}
-
-function Wait-WinwsReady {
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    while ($timer.ElapsedMilliseconds -lt 5000) {
-        if (Get-Process -Name "winws" -ErrorAction SilentlyContinue) {
-            Start-Sleep -Milliseconds 300
-            return $true
-        }
-        Start-Sleep -Milliseconds 200
-    }
-    return $false
+    $lineCount = (Get-Content $listFile | Measure-Object -Line).Lines
+    if ($lineCount -eq 0) { return "any" }
+    $hasDummy = Get-Content $listFile | Select-String -Pattern "203\.0\.113\.113/32" -Quiet
+    if ($hasDummy) { return "none" } else { return "loaded" }
 }
 
 function Set-IpsetMode {
@@ -49,28 +37,12 @@ function Set-IpsetMode {
     }
 }
 
-# Pause that tolerates stray keystrokes and non-interactive hosts.
-# Tests run for minutes, so any key pressed meanwhile stays in the console
-# input buffer and would be swallowed instantly by a bare ReadKey.
-function Wait-AnyKey {
-    param([string]$message = "Press any key to close...")
-    Write-Host $message -ForegroundColor Yellow
-    try {
-        while ([System.Console]::KeyAvailable) { [void][System.Console]::ReadKey($true) }
-        [void][System.Console]::ReadKey($true)
-    } catch {
-        # No interactive console (stdin redirected): ReadKey throws here
-        [void](Read-Host)
-    }
-}
-
 trap {
     Write-Host "[ERROR] Script interrupted. Restoring ipset..." -ForegroundColor Red
     if ($originalIpsetStatus -and $originalIpsetStatus -ne "any") {
         Set-IpsetMode -mode "restore"
     }
     Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
-    Wait-AnyKey
     break
 }
 
@@ -103,52 +75,56 @@ function Convert-Target {
     })
 }
 
-# DPI checker defaults (override via MONITOR_* env vars like in monitor.ps1)
-$dpiTimeoutSeconds = 5
-$dpiRangeBytes = 65536
-$defaultMaxParallel = [Math]::Min(16, [Math]::Max(8, [Environment]::ProcessorCount * 2))
-$dpiMaxParallel = $defaultMaxParallel
-$dpiCustomHost = $env:MONITOR_HOST
-if ($env:MONITOR_TIMEOUT) { [int]$dpiTimeoutSeconds = $env:MONITOR_TIMEOUT }
-if ($env:MONITOR_RANGE) { [int]$dpiRangeBytes = $env:MONITOR_RANGE }
-if ($env:MONITOR_MAX_PARALLEL) { [int]$dpiMaxParallel = $env:MONITOR_MAX_PARALLEL }
-$standardCurlTimeout = 4
-$standardMaxParallel = $defaultMaxParallel
-if ($env:TEST_CURL_TIMEOUT) { [int]$standardCurlTimeout = $env:TEST_CURL_TIMEOUT }
-if ($env:TEST_MAX_PARALLEL) { [int]$standardMaxParallel = $env:TEST_MAX_PARALLEL }
-
 function Get-DpiSuite {
-    # Suite sourced from https://github.com/hyperion-cs/dpi-checkers (Apache-2.0 license)
-    # Original copyright retained from dpi-checkers repository
-    $url = "https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json"
-
-    try {
-        (Invoke-RestMethod -Uri $url -TimeoutSec $dpiTimeoutSeconds) |
-            Select-Object `
-                @{n='Id';       e={$_.id}},
-                @{n='Provider'; e={$_.provider}},
-                @{n='Country';  e={$_.country}},
-                @{n='Host';     e={$_.host}}
-    }
-    catch {
-        Write-Host "[WARN] Fetch dpi suite failed." -ForegroundColor Yellow
-        @()
-    }
+    # Suite sourced from monitor.ps1 (DPI TCP 16-20)
+    return @(
+        @{ Id = "US.CF-01"; Provider = "Cloudflare"; Url = "https://cdn.cookielaw.org/scripttemplates/202501.2.0/otBannerSdk.js"; Times = 1 }
+        @{ Id = "US.CF-02"; Provider = "Cloudflare"; Url = "https://genshin.jmp.blue/characters/all#"; Times = 1 }
+        @{ Id = "US.CF-03"; Provider = "Cloudflare"; Url = "https://api.frankfurter.dev/v1/2000-01-01..2002-12-31"; Times = 1 }
+        @{ Id = "US.DO-01"; Provider = "DigitalOcean"; Url = "https://genderize.io/"; Times = 2 }
+        @{ Id = "DE.HE-01"; Provider = "Hetzner"; Url = "https://j.dejure.org/jcg/doctrine/doctrine_banner.webp"; Times = 1 }
+        @{ Id = "FI.HE-01"; Provider = "Hetzner"; Url = "https://tcp1620-01.dubybot.live/1MB.bin"; Times = 1 }
+        @{ Id = "FI.HE-02"; Provider = "Hetzner"; Url = "https://tcp1620-02.dubybot.live/1MB.bin"; Times = 1 }
+        @{ Id = "FI.HE-03"; Provider = "Hetzner"; Url = "https://tcp1620-05.dubybot.live/1MB.bin"; Times = 1 }
+        @{ Id = "FI.HE-04"; Provider = "Hetzner"; Url = "https://tcp1620-06.dubybot.live/1MB.bin"; Times = 1 }
+        @{ Id = "FR.OVH-01"; Provider = "OVH"; Url = "https://eu.api.ovh.com/console/rapidoc-min.js"; Times = 1 }
+        @{ Id = "FR.OVH-02"; Provider = "OVH"; Url = "https://ovh.sfx.ovh/10M.bin"; Times = 1 }
+        @{ Id = "SE.OR-01"; Provider = "Oracle"; Url = "https://oracle.sfx.ovh/10M.bin"; Times = 1 }
+        @{ Id = "DE.AWS-01"; Provider = "AWS"; Url = "https://tms.delta.com/delta/dl_anderson/Bootstrap.js"; Times = 1 }
+        @{ Id = "US.AWS-01"; Provider = "AWS"; Url = "https://corp.kaltura.com/wp-content/cache/min/1/wp-content/themes/airfleet/dist/styles/theme.css"; Times = 1 }
+        @{ Id = "US.GC-01"; Provider = "Google Cloud"; Url = "https://api.usercentrics.eu/gvl/v3/en.json"; Times = 1 }
+        @{ Id = "US.FST-01"; Provider = "Fastly"; Url = "https://openoffice.apache.org/images/blog/rejected.png"; Times = 1 }
+        @{ Id = "US.FST-02"; Provider = "Fastly"; Url = "https://www.juniper.net/etc.clientlibs/juniper/clientlibs/clientlib-site/resources/fonts/lato/Lato-Regular.woff2"; Times = 1 }
+        @{ Id = "PL.AKM-01"; Provider = "Akamai"; Url = "https://www.lg.com/lg5-common-gp/library/jquery.min.js"; Times = 1 }
+        @{ Id = "PL.AKM-02"; Provider = "Akamai"; Url = "https://media-assets.stryker.com/is/image/stryker/gateway_1?$max_width_1410$"; Times = 1 }
+        @{ Id = "US.CDN77-01"; Provider = "CDN77"; Url = "https://cdn.eso.org/images/banner1920/eso2520a.jpg"; Times = 1 }
+        @{ Id = "DE.CNTB-01"; Provider = "Contabo"; Url = "https://cloudlets.io/wp-content/themes/Avada/includes/lib/assets/fonts/fontawesome/webfonts/fa-solid-900.woff2"; Times = 1 }
+        @{ Id = "FR.SW-01"; Provider = "Scaleway"; Url = "https://renklisigorta.com.tr/teklif-al"; Times = 1 }
+        @{ Id = "US.CNST-01"; Provider = "Constant"; Url = "https://cdn.xuansiwei.com/common/lib/font-awesome/4.7.0/fontawesome-webfont.woff2?v=4.7.0"; Times = 1 }
+        # Local test payload (requires: run make-test-payload.ps1 and serve via python -m http.server 8000)
+        # @{ Id = "LOCAL.TEST-16K"; Provider = "LocalTest"; Url = "http://127.0.0.1:8000/test-payload-16384b.bin"; Times = 1 }
+    )
 }
 
 function Build-DpiTargets {
     param(
-        [string]$CustomHost
+        [string]$CustomUrl
     )
 
     $suite = Get-DpiSuite
     $targets = @()
 
-    if ($CustomHost) {
-        $targets += @{ Id = "CUSTOM"; Provider = "Custom"; Country = "💡"; Host = $CustomHost }
+    if ($CustomUrl) {
+        $targets += @{ Id = "CUSTOM"; Provider = "Custom"; Url = $CustomUrl }
     } else {
         foreach ($entry in $suite) {
-            $targets += @{ Id = $entry.Id; Country = $entry.Country; Provider = $entry.Provider; Host = $entry.Host }
+            $repeat = $entry.Times
+            if (-not $repeat -or $repeat -lt 1) { $repeat = 1 }
+            for ($i = 0; $i -lt $repeat; $i++) {
+                $suffix = ""
+                if ($repeat -gt 1) { $suffix = "@$i" }
+                $targets += @{ Id = "$($entry.Id)$suffix"; Provider = $entry.Provider; Url = $entry.Url }
+            }
         }
     }
 
@@ -160,6 +136,8 @@ function Invoke-DpiSuite {
         [array]$Targets,
         [int]$TimeoutSeconds,
         [int]$RangeBytes,
+        [int]$WarnMinKB,
+        [int]$WarnMaxKB,
         [int]$MaxParallel
     )
 
@@ -172,58 +150,45 @@ function Invoke-DpiSuite {
     $rangeSpec = "0-$($RangeBytes - 1)"
     $warnDetected = $false
 
-    Write-Host "[INFO] Targets: $($Targets.Count) (custom URL overrides suite). Range: $rangeSpec bytes; Timeout: $($TimeoutSeconds)s" -ForegroundColor Cyan
+    Write-Host "[INFO] Targets: $($Targets.Count) (custom URL overrides suite). Range: $rangeSpec bytes; Timeout: $TimeoutSeconds s; Warn window: $WarnMinKB-$WarnMaxKB KB" -ForegroundColor Cyan
     Write-Host "[INFO] Starting DPI TCP 16-20 checks (parallel: $MaxParallel)..." -ForegroundColor DarkGray
 
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxParallel)
     $runspacePool.Open()
 
-    $payload = New-Object byte[] $RangeBytes
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($payload)
-
-    $payloadFile = New-TemporaryFile
-    [IO.File]::WriteAllBytes($payloadFile, $payload)
-
     $scriptBlock = {
-        param($payloadFile, $target, $tests, $rangeSpec, $TimeoutSeconds)
+        param($target, $tests, $rangeSpec, $TimeoutSeconds, $WarnMinKB, $WarnMaxKB)
 
         $warned = $false
         $lines = @()
 
         foreach ($test in $tests) {
             $curlArgs = @(
+                "-L",
                 "--range", $rangeSpec,
                 "-m", $TimeoutSeconds,
-                "--connect-timeout", ([Math]::Min(3, $TimeoutSeconds)),
-                "-w", "%{http_code} %{size_upload} %{size_download} %{time_total}",
+                "-w", "%{http_code} %{size_download}",
                 "-o", "NUL",
-                "-X", "POST",
-                "--data-binary", "@$payloadFile",
                 "-s"
-            ) + $test.Args + @("https://$($target.Host)")
+            ) + $test.Args + $target.Url
 
             $output = & curl.exe @curlArgs 2>&1
             $exit = $LASTEXITCODE
             $text = ($output | Out-String).Trim()
 
             $code = "NA"
-            $upBytes = 0
-            $downBytes = 0
-            $time = -1
+            $sizeBytes = 0
 
-            if ($text -match '^(?<code>\d{3})\s+(?<up>\d+)\s+(?<down>\d+)\s+(?<time>[\d\.]+)$') {
+            if ($text -match '^(?<code>\d{3})\s+(?<size>\d+)$') {
                 $code = $matches['code']
-                $upBytes = [int64]$matches['up']
-                $downBytes = [int64]$matches['down']
-                $time = [double]$matches['time']
+                $sizeBytes = [int64]$matches['size']
             } elseif (($exit -eq 35) -or ($text -match "not supported|does not support|protocol\s+'.+'\s+not\s+supported|protocol\s+.+\s+not\s+supported|unsupported protocol|TLS.not supported|Unrecognized option|Unknown option|unsupported option|unsupported feature|schannel|SSL")) {
                 $code = "UNSUP"
             } elseif ($text) {
                 $code = "ERR"
             }
 
-            $upKB = [math]::Round($upBytes / 1024, 1)
-            $downKB = [math]::Round($downBytes / 1024, 1)
+            $sizeKB = [math]::Round($sizeBytes / 1024, 1)
             $status = "OK"
             $color = "Green"
 
@@ -235,30 +200,28 @@ function Invoke-DpiSuite {
                 $color = "Red"
             }
 
-            if (($upBytes -gt 0) -and ($downBytes -eq 0) -and ($time -ge $TimeoutSeconds) -and ($exit -ne 0)) {
+            if (($sizeKB -ge $WarnMinKB) -and ($sizeKB -le $WarnMaxKB) -and ($exit -ne 0)) {
                 $status = "LIKELY_BLOCKED"
                 $color = "Yellow"
                 $warned = $true
             }
 
             $lines += [PSCustomObject]@{
-                TestLabel = $test.Label
-                Code      = $code
-                UpBytes   = $upBytes
-                UpKB      = $upKB
-                DownBytes = $downBytes
-                DownKB    = $downKB
-                Time      = $time
-                Status    = $status
-                Color     = $color
-                Warned    = $warned
+                TargetId   = $target.Id
+                Provider   = $target.Provider
+                TestLabel  = $test.Label
+                Code       = $code
+                SizeBytes  = $sizeBytes
+                SizeKB     = $sizeKB
+                Status     = $status
+                Color      = $color
+                Warned     = $warned
             }
         }
 
         return [PSCustomObject]@{
             TargetId = $target.Id
             Provider = $target.Provider
-            Country   = $target.Country
             Lines    = $lines
             Warned   = $warned
         }
@@ -267,17 +230,17 @@ function Invoke-DpiSuite {
     $runspaces = @()
     foreach ($target in $Targets) {
         $powershell = [powershell]::Create().AddScript($scriptBlock)
-        [void]$powershell.AddArgument($payloadFile)
         [void]$powershell.AddArgument($target)
         [void]$powershell.AddArgument($tests)
         [void]$powershell.AddArgument($rangeSpec)
         [void]$powershell.AddArgument($TimeoutSeconds)
+        [void]$powershell.AddArgument($WarnMinKB)
+        [void]$powershell.AddArgument($WarnMaxKB)
         $powershell.RunspacePool = $runspacePool
 
         $runspaces += [PSCustomObject]@{
             Powershell = $powershell
             Handle     = $powershell.BeginInvoke()
-            TargetId   = $target.Id
         }
     }
 
@@ -285,12 +248,12 @@ function Invoke-DpiSuite {
     foreach ($rs in $runspaces) {
         # Wait for the runspace to complete with a small grace period beyond curl's timeout
         try {
-            $waitMs = (([int]$TimeoutSeconds * 3) + 5) * 1000
+            $waitMs = ([int]$TimeoutSeconds + 5) * 1000
             $handle = $rs.Handle
             if ($handle -and $handle.AsyncWaitHandle) {
                 $completed = $handle.AsyncWaitHandle.WaitOne($waitMs)
                 if (-not $completed) {
-                    Write-Host "[WARN] Runspace for [$($rs.TargetId)] timed out after $waitMs ms; stopping runspace..." -ForegroundColor Yellow
+                    Write-Host "[WARN] Runspace for target timed out after $waitMs ms; stopping runspace..." -ForegroundColor Yellow
                     try { $rs.Powershell.Stop() } catch {}
                 }
             }
@@ -299,23 +262,7 @@ function Invoke-DpiSuite {
         }
 
         try {
-            $res = $rs.Powershell.EndInvoke($rs.Handle)
-            $results += $res
-
-            Write-Host "`n=== [$($res.Country)][$($res.Provider)] $($res.TargetId) ===" -ForegroundColor DarkCyan
-            foreach ($line in $res.Lines) {
-                $msg = "[{0}] code={1} buf_up={2} bytes ({3} KB) buf_down={4} bytes ({5} KB) time={6}s status={7}" -f $line.TestLabel, $line.Code, $line.UpBytes, $line.UpKB, $line.DownBytes, $line.DownKB, $line.Time, $line.Status
-                Write-Host $msg -ForegroundColor $line.Color
-                if ($line.Status -eq "LIKELY_BLOCKED") {
-                    Write-Host "  Pattern matches 16-20KB freeze; censor likely cutting this strategy." -ForegroundColor Yellow
-                }
-            }
-
-            if ($res.Warned) {
-                $warnDetected = $true
-            } else {
-                Write-Host "  No 16-20KB freeze pattern for this target." -ForegroundColor Green
-            }
+            $results += $rs.Powershell.EndInvoke($rs.Handle)
         } catch {
             Write-Host "[WARN] EndInvoke failed for a runspace; treating as failure." -ForegroundColor Yellow
             $failedLine = [PSCustomObject]@{
@@ -333,7 +280,24 @@ function Invoke-DpiSuite {
     }
     $runspacePool.Close()
     $runspacePool.Dispose()
-    Remove-Item -LiteralPath $payloadFile -Force -ErrorAction SilentlyContinue
+
+    foreach ($res in $results) {
+        Write-Host "`n=== $($res.TargetId) [$($res.Provider)] ===" -ForegroundColor DarkCyan
+
+        foreach ($line in $res.Lines) {
+            $msg = "[{0}][{1}] code={2} size={3} bytes ({4} KB) status={5}" -f $line.TargetId, $line.TestLabel, $line.Code, $line.SizeBytes, $line.SizeKB, $line.Status
+            Write-Host $msg -ForegroundColor $line.Color
+            if ($line.Status -eq "LIKELY_BLOCKED") {
+                Write-Host "  Pattern matches 16-20KB freeze; censor likely cutting this strategy." -ForegroundColor Yellow
+            }
+        }
+
+        if (-not $res.Warned) {
+            Write-Host "  No 16-20KB freeze pattern for this target." -ForegroundColor Green
+        } else {
+            $warnDetected = $true
+        }
+    }
 
     if ($warnDetected) {
         Write-Host ""
@@ -398,16 +362,29 @@ if (Test-ZapretServiceConflict) {
 if ($hasErrors) {
     Write-Host ""
     Write-Host "Fix the errors above and rerun." -ForegroundColor Yellow
-    Wait-AnyKey -message "Press any key to exit..."
+    Write-Host "Press any key to exit..." -ForegroundColor Yellow
+    [void][System.Console]::ReadKey($true)
     exit 1
 }
 
-$dpiTargets = @()
+# DPI checker defaults (override via MONITOR_* env vars like in monitor.ps1)
+$dpiTimeoutSeconds = 5
+$dpiRangeBytes = 262144
+$dpiWarnMinKB = 14
+$dpiWarnMaxKB = 22
+$dpiMaxParallel = 8
+$dpiCustomUrl = $env:MONITOR_URL
+if ($env:MONITOR_TIMEOUT) { [int]$dpiTimeoutSeconds = $env:MONITOR_TIMEOUT }
+if ($env:MONITOR_RANGE) { [int]$dpiRangeBytes = $env:MONITOR_RANGE }
+if ($env:MONITOR_WARN_MINKB) { [int]$dpiWarnMinKB = $env:MONITOR_WARN_MINKB }
+if ($env:MONITOR_WARN_MAXKB) { [int]$dpiWarnMaxKB = $env:MONITOR_WARN_MAXKB }
+if ($env:MONITOR_MAX_PARALLEL) { [int]$dpiMaxParallel = $env:MONITOR_MAX_PARALLEL }
+$dpiTargets = Build-DpiTargets -CustomUrl $dpiCustomUrl
 
 # Config
 $targetDir = $rootDir
 if (-not $targetDir) { $targetDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-$batFiles = Get-ChildItem -Path $targetDir -Filter "*.bat" | Where-Object { $_.Name -notlike "service*" } | Sort-Object { [Regex]::Replace($_.Name, "(\d+)", { $args[0].Value.PadLeft(8, "0") }) }
+$batFiles = Get-ChildItem -Path $targetDir -Filter "*.bat" | Where-Object { $_.Name -notlike "service*" } | Sort-Object Name
 
 $globalResults = @()
 
@@ -454,66 +431,21 @@ function Read-ConfigSelection {
             Write-Host "  [$idx] $($allFiles[$i].Name)" -ForegroundColor Gray
         }
 
-        $selectionInput = Read-Host "Enter numbers (e.g. 1,3,5) , ranges (e.g. 2-7), or mixed (e.g. 1,5-10,12). '0' for all"
+        $selectionInput = Read-Host "Enter numbers separated by comma (e.g. 1,3,5) or '0' to run all"
         $trimmed = $selectionInput.Trim()
-        
         if ($trimmed -eq '0') {
             return $allFiles
         }
 
-        $parts = $selectionInput -split '[,\s]+' | Where-Object { $_ -match '^\d+(-\d+)?$' }
-        if ($parts.Count -eq 0) {
+        $numbers = $selectionInput -split "[\,\s]+" | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+        $valid = $numbers | Where-Object { $_ -ge 1 -and $_ -le $allFiles.Count } | Select-Object -Unique
+
+        if (-not $valid -or $valid.Count -eq 0) {
             Write-Host ""
-            Write-Host "Invalid input format. Use numbers, ranges (1-5), or combinations (1,3-7,10). Try again." -ForegroundColor Yellow
-            continue
-        }
-        $selectedIndices = @()
-        $hasErrors = $false
-        
-        foreach ($part in $parts) {
-            if ($part -match '^(\d+)-(\d+)$') {
-                $start = [int]$matches[1]
-                $end = [int]$matches[2]
-                
-                if ($start -gt $end) {
-                    Write-Host "  [WARN] Invalid range '$part' (start > end). Skipping." -ForegroundColor Yellow
-                    $hasErrors = $true
-                    continue
-                }
-                
-                if ($start -lt 1 -or $end -gt $allFiles.Count) {
-                    Write-Host "  [WARN] Range '$part' out of bounds (valid: 1-$($allFiles.Count)). Skipping invalid parts." -ForegroundColor Yellow
-                    $hasErrors = $true
-                    $start = [Math]::Max($start, 1)
-                    $end = [Math]::Min($end, $allFiles.Count)
-                }
-                
-                for ($i = $start; $i -le $end; $i++) {
-                    $selectedIndices += $i
-                }
-            } else {
-                $num = [int]$part
-                if ($num -ge 1 -and $num -le $allFiles.Count) {
-                    $selectedIndices += $num
-                } else {
-                    Write-Host "  [WARN] Number '$num' out of bounds (valid: 1-$($allFiles.Count)). Skipping." -ForegroundColor Yellow
-                    $hasErrors = $true
-                }
-            }
-        }
-        $valid = $selectedIndices | Sort-Object -Unique | Where-Object { $_ -ge 1 -and $_ -le $allFiles.Count }
-        if ($valid.Count -eq 0) {
-            Write-Host ""
-            Write-Host "No valid configs selected. Try again." -ForegroundColor Yellow
+            Write-Host "No configs selected. Try again." -ForegroundColor Yellow
             continue
         }
 
-        # Checker
-         Write-Host "Selected configs: $($valid -join ', ')" -ForegroundColor Green
-        if ($hasErrors) {
-            Write-Host "Some entries were skipped due to errors (see warnings above)." -ForegroundColor Yellow
-        }
-        
         return $valid | ForEach-Object { $allFiles[$_ - 1] }
     }
 }
@@ -525,10 +457,6 @@ $mode = Read-ModeSelection
 if ($mode -eq 'select') {
     $selected = Read-ConfigSelection -allFiles $batFiles
     $batFiles = @($selected)
-}
-
-if ($testType -eq 'dpi') {
-    $dpiTargets = Build-DpiTargets -CustomHost $dpiCustomHost
 }
 
 # Load targets once for standard mode
@@ -581,7 +509,8 @@ if ($testType -eq 'standard') {
 # Ensure we have configs to run
 if (-not $batFiles -or $batFiles.Count -eq 0) {
     Write-Host "[ERROR] No general*.bat files found" -ForegroundColor Red
-    Wait-AnyKey -message "Press any key to exit..."
+    Write-Host "Press any key to exit..." -ForegroundColor Yellow
+    [void][System.Console]::ReadKey($true)
     exit 1
 }
 
@@ -616,33 +545,20 @@ function Restore-WinwsSnapshot {
         if ($current -and $current -contains $p.CommandLine) { continue }
 
         $exe = $p.ExecutablePath
-
-        # Split the program token off the command line to recover the arguments.
-        # A quoted token is unambiguous; an unquoted one may contain spaces, so
-        # fall back to the known executable path before guessing at whitespace.
-        $processArgs = $null
-        if ($p.CommandLine -match '^\s*"[^"]*"\s*(.*)$') {
-            $processArgs = $matches[1].Trim()
-        } elseif ($p.CommandLine -and $p.CommandLine.StartsWith($exe, [StringComparison]::OrdinalIgnoreCase)) {
-            $processArgs = $p.CommandLine.Substring($exe.Length).Trim()
-        } elseif ($p.CommandLine -match '^\s*\S+\s*(.*)$') {
-            $processArgs = $matches[1].Trim()
+        $args = ""
+        if ($p.CommandLine) {
+            $quotedExe = '"' + $exe + '"'
+            if ($p.CommandLine.StartsWith($quotedExe)) {
+                $args = $p.CommandLine.Substring($quotedExe.Length).Trim()
+            } elseif ($p.CommandLine.StartsWith($exe)) {
+                $args = $p.CommandLine.Substring($exe.Length).Trim()
+            }
         }
 
-        if (-not $processArgs) {
-            Write-Host "[WARN] Could not read arguments of previous winws instance ($exe); skipping restore." -ForegroundColor Yellow
-            continue
-        }
-
-        try {
-            Start-Process -FilePath $exe -ArgumentList $processArgs -WorkingDirectory (Split-Path $exe -Parent) -WindowStyle Minimized | Out-Null
-        } catch {
-            Write-Host "[WARN] Failed to restore previous winws instance ($exe): $_" -ForegroundColor Yellow
-        }
+        Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory (Split-Path $exe -Parent) -WindowStyle Minimized | Out-Null
     }
 }
 
-$env:NO_UPDATE_CHECK = "1"
 $originalWinws = Get-WinwsSnapshot
 
 Write-Host ""
@@ -678,17 +594,13 @@ try {
     $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$($file.FullName)`"" -WorkingDirectory $targetDir -PassThru -WindowStyle Minimized
     
     # Wait init
-    if (-not (Wait-WinwsReady)) {
-        Write-Host "  > Strategy failed to start (winws process not found). Skipping..." -ForegroundColor Red
-        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-        continue
-    }
+    Start-Sleep -Seconds 5
     
     if ($testType -eq 'standard') {
-        $curlTimeoutSeconds = $standardCurlTimeout
+        $curlTimeoutSeconds = 5
 
         # Parallel target checks via runspace pool (faster than jobs)
-        $maxParallel = $standardMaxParallel
+        $maxParallel = 8
         $runspacePool = [runspacefactory]::CreateRunspacePool(1, $maxParallel)
         $runspacePool.Open()
 
@@ -704,27 +616,13 @@ try {
                     @{ Label = "TLS1.3"; Args = @("--tlsv1.3", "--tls-max", "1.3") }
                 )
 
-                $baseArgs = @("-I", "-s", "-m", $curlTimeoutSeconds, "--connect-timeout", ([Math]::Min(2, $curlTimeoutSeconds)), "-o", "NUL", "-w", "%{http_code}", "--show-error")
+                $baseArgs = @("-I", "-s", "-m", $curlTimeoutSeconds, "-o", "NUL", "-w", "%{http_code}")
                 foreach ($test in $tests) {
                     try {
                         $curlArgs = $baseArgs + $test.Args
-                        $stderr = $null
-                        $output = & curl.exe @curlArgs $t.Url 2>&1 | ForEach-Object {
-                            if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                                $stderr += $_.Exception.Message + " "
-                            } else {
-                                $_
-                            }
-                        }
-                        $httpCode = ($output | Out-String).Trim()
-                        
-                        $dnsHijack = ($stderr -match "Could not resolve host|certificate|SSL certificate problem|self[- ]?signed|certificate verify failed|unable to get local issuer certificate")                        
-                        if ($dnsHijack) {
-                            $httpPieces += "$($test.Label):SSL  "
-                            continue
-                        }
-                        
-                        $unsupported = (($LASTEXITCODE -eq 35) -or ($stderr -match "does not support|not supported|protocol\s+'?.+'?\s+not\s+supported|unsupported protocol|TLS.*not supported|Unrecognized option|Unknown option|unsupported option|unsupported feature|schannel"))
+                        $output = & curl.exe @curlArgs $t.Url 2>&1
+                        $text = ($output | Out-String).Trim()
+                        $unsupported = (($LASTEXITCODE -eq 35) -or ($text -match "does not support|not supported|protocol\s+'?.+'?\s+not\s+supported|unsupported protocol|TLS.*not supported|Unrecognized option|Unknown option|unsupported option|unsupported feature|schannel|SSL"))
                         if ($unsupported) {
                             $httpPieces += "$($test.Label):UNSUP"
                             continue
@@ -744,19 +642,12 @@ try {
 
             $pingResult = "n/a"
             if ($t.PingTarget) {
-                $ping = $null
                 try {
-                    $ping = New-Object System.Net.NetworkInformation.Ping
-                    $reply = $ping.Send($t.PingTarget, 1000)
-                    if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                        $pingResult = "{0:N0} ms" -f $reply.RoundtripTime
-                    } else {
-                        $pingResult = "Timeout"
-                    }
+                    $pings = Test-Connection -ComputerName $t.PingTarget -Count 3 -ErrorAction Stop
+                    $avg = ($pings | Measure-Object -Property ResponseTime -Average).Average
+                    $pingResult = "{0:N0} ms" -f $avg
                 } catch {
                     $pingResult = "Timeout"
-                } finally {
-                    if ($ping) { $ping.Dispose() }
                 }
             }
 
@@ -787,7 +678,7 @@ try {
         $targetResults = @()
         foreach ($rs in $runspaces) {
             try {
-                $waitMs = (([int]$curlTimeoutSeconds * 3) + 5) * 1000
+                $waitMs = ([int]$curlTimeoutSeconds + 5) * 1000
                 $handle = $rs.Handle
                 if ($handle -and $handle.AsyncWaitHandle) {
                     $completed = $handle.AsyncWaitHandle.WaitOne($waitMs)
@@ -825,7 +716,6 @@ try {
                 foreach ($tok in $res.HttpTokens) {
                     $tokColor = "Green"
                     if ($tok -match "UNSUP") { $tokColor = "Yellow" }
-                    elseif ($tok -match "SSL") { $tokColor = "Red" }
                     elseif ($tok -match "ERR") { $tokColor = "Red" }
                     Write-Host " $tok" -NoNewline -ForegroundColor $tokColor
                 }
@@ -853,7 +743,7 @@ try {
         $globalResults += @{ Config = $file.Name; Type = 'standard'; Results = $targetResults }
     } else {
         Write-Host "  > Running DPI checkers..." -ForegroundColor DarkGray
-        $dpiResults = Invoke-DpiSuite -Targets $dpiTargets -TimeoutSeconds $dpiTimeoutSeconds -RangeBytes $dpiRangeBytes -MaxParallel $dpiMaxParallel
+        $dpiResults = Invoke-DpiSuite -Targets $dpiTargets -TimeoutSeconds $dpiTimeoutSeconds -RangeBytes $dpiRangeBytes -WarnMinKB $dpiWarnMinKB -WarnMaxKB $dpiWarnMaxKB -MaxParallel $dpiMaxParallel
         $globalResults += @{ Config = $file.Name; Type = 'dpi'; Results = $dpiResults }
     }
     
@@ -875,7 +765,6 @@ try {
                 if ($targetRes.IsUrl) {
                     foreach ($tok in $targetRes.HttpTokens) {
                         if ($tok -match "OK") { $analytics[$config].OK++ }
-                        elseif ($tok -match "SSL") { $analytics[$config].ERROR++ }
                         elseif ($tok -match "ERROR") { $analytics[$config].ERROR++ }
                         elseif ($tok -match "UNSUP") { $analytics[$config].UNSUP++ }
                     }
@@ -898,18 +787,13 @@ try {
 
     Write-Host ""
     Write-Host "=== ANALYTICS ===" -ForegroundColor Cyan
-    $maxConfigLen = ($analytics.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
     foreach ($config in $analytics.Keys) {
         $a = $analytics[$config]
-        $configPadded = $config.PadRight($maxConfigLen)
         if ($a.ContainsKey('PingOK')) {
-            $line = "{0} : HTTP OK: {1,3}, ERR: {2,3}, UNSUP: {3,3}, Ping OK: {4,3}, Fail: {5,3}" -f `
-                $configPadded, $a.OK, $a.ERROR, $a.UNSUP, $a.PingOK, $a.PingFail
+            Write-Host "$config : HTTP OK: $($a.OK), ERR: $($a.ERROR), UNSUP: $($a.UNSUP), Ping OK: $($a.PingOK), Fail: $($a.PingFail)" -ForegroundColor Yellow
         } else {
-            $line = "{0} : OK: {1,3}, FAIL: {2,3}, UNSUP: {3,3}, BLOCKED: {4,3}" -f `
-                $configPadded, $a.OK, $a.FAIL, $a.UNSUPPORTED, $a.LIKELY_BLOCKED
+            Write-Host "$config : OK: $($a.OK), FAIL: $($a.FAIL), UNSUP: $($a.UNSUPPORTED), BLOCKED: $($a.LIKELY_BLOCKED)" -ForegroundColor Yellow
         }
-        Write-Host $line -ForegroundColor Yellow
     }
 
     # Determine best strategy
@@ -941,61 +825,49 @@ try {
     # Save to file
     $dateStr = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $resultFile = Join-Path $resultsDir "test_results_$dateStr.txt"
-    $resultLines = New-Object System.Collections.Generic.List[string]
+    # Clear file
+    "" | Out-File $resultFile -Encoding UTF8
     foreach ($res in $globalResults) {
         $config = $res.Config
         $type = $res.Type
         $results = $res.Results
-        [void]$resultLines.Add("Config: $config (Type: $type)")
+        Add-Content $resultFile "Config: $config (Type: $type)"
         if ($type -eq 'standard') {
             foreach ($targetRes in $results) {
                 $name = $targetRes.Name
                 $http = $targetRes.HttpTokens -join ' '
                 $ping = $targetRes.PingResult
-                [void]$resultLines.Add("  $name : $http | Ping: $ping")
+                Add-Content $resultFile "  $name : $http | Ping: $ping"
             }
         } elseif ($type -eq 'dpi') {
             foreach ($targetRes in $results) {
                 $id = $targetRes.TargetId
                 $provider = $targetRes.Provider
-                $country = $targetRes.Country
-                if ($country) {
-                    [void]$resultLines.Add("  Target: [$country] $id ($provider)")
-                } else {
-                    [void]$resultLines.Add("  Target: $id ($provider)")
-                }
+                Add-Content $resultFile "  Target: $id ($provider)"
                 foreach ($line in $targetRes.Lines) {
                     $test = $line.TestLabel
                     $code = $line.Code
-                    $up = $line.UpKB
-                    $down = $line.DownKB
-                    $time = $line.Time
+                    $size = $line.SizeKB
                     $status = $line.Status
-                    [void]$resultLines.Add("    ${test}: code=${code}  up=${up} KB  down=${down} KB  time=${time}s  status=${status}")
+                    Add-Content $resultFile "    ${test}: code=${code} size=${size} KB status=${status}"
                 }
             }
         }
-        [void]$resultLines.Add("")
+        Add-Content $resultFile ""
     }
 
     # Add analytics
-    [void]$resultLines.Add("=== ANALYTICS ===")
-    $maxConfigLen = ($analytics.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    Add-Content $resultFile "=== ANALYTICS ==="
     foreach ($config in $analytics.Keys) {
         $a = $analytics[$config]
-        $configPadded = $config.PadRight($maxConfigLen)
         if ($a.ContainsKey('PingOK')) {
-            $line = "{0} : HTTP OK: {1,3}, ERR: {2,3}, UNSUP: {3,3}, Ping OK: {4,3}, Fail: {5,3}" -f `
-                $configPadded, $a.OK, $a.ERROR, $a.UNSUP, $a.PingOK, $a.PingFail
+            Add-Content $resultFile "$config : HTTP OK: $($a.OK), ERR: $($a.ERROR), UNSUP: $($a.UNSUP), Ping OK: $($a.PingOK), Fail: $($a.PingFail)"
         } else {
-            $line = "{0} : OK: {1,3}, FAIL: {2,3}, UNSUP: {3,3}, BLOCKED: {4,3}" -f `
-                $configPadded, $a.OK, $a.FAIL, $a.UNSUPPORTED, $a.LIKELY_BLOCKED
+            Add-Content $resultFile "$config : OK: $($a.OK), FAIL: $($a.FAIL), UNSUP: $($a.UNSUPPORTED), BLOCKED: $($a.LIKELY_BLOCKED)"
         }
-        [void]$resultLines.Add($line)
     }
 
-    [void]$resultLines.Add("Best strategy: $bestConfig")
-    $resultLines | Set-Content $resultFile -Encoding UTF8
+    Add-Content $resultFile "Best strategy: $bestConfig"
 
     Write-Host "Results saved to $resultFile" -ForegroundColor Green
 
@@ -1015,6 +887,7 @@ try {
     Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
 }
 
-    Wait-AnyKey
+    Write-Host "Press any key to close..." -ForegroundColor Yellow
+    [void][System.Console]::ReadKey($true)
     exit
 }
